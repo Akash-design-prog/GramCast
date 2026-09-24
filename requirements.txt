@@ -1,0 +1,35 @@
+# Data handling (gridded weather + geospatial)
+xarray
+netCDF4
+cfgrib
+rioxarray
+rasterio
+geopandas
+shapely
+rasterstats
+numpy
+scipy
+
+# Plotting
+matplotlib
+cartopy
+
+# Baselines
+scikit-learn
+gstools
+
+# Deep learning
+torch
+torchvision
+
+# Backend
+fastapi
+uvicorn[standard]
+requests
+
+# Voice / TTS
+gTTS
+
+# Utilities
+python-dotenv
+tqdm
