@@ -1,0 +1,17 @@
+# raw data (large, re-downloadable via scripts — not committed)
+*.nc
+*.grd
+*.grib2
+*.tif
+*.tiff
+data/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+.env
+
+# internal planning/log files — not for GitHub
+DEV_LOG.md
+docs/ISSUES_PLAN.md
