@@ -12,6 +12,8 @@ __pycache__/
 venv/
 .env
 
-# internal planning/log files — not for GitHub
+# internal planning/log/guidance files — not for GitHub
 DEV_LOG.md
 docs/ISSUES_PLAN.md
+SIH26074_Project_Guide_v3.md
+HANDOFF_FROM_GEOENHANCE_AI.md
