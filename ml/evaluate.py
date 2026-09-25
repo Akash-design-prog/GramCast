@@ -71,8 +71,15 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     print(f"Loaded checkpoint: epoch {ckpt['epoch']}, val_loss {ckpt['val_loss']:.4f}")
 
+    # ml/train.py saves the run config under "args" (vars(argparse.Namespace)); the Kaggle notebook's
+    # inlined training loop (can't import local repo modules, so it's a separate implementation) saves
+    # it under "config" instead - both are legitimate checkpoint producers, so accept either.
+    ckpt_config = ckpt.get("args") or ckpt.get("config")
+    if ckpt_config is None:
+        raise KeyError("checkpoint has neither 'args' nor 'config' key - unrecognized checkpoint schema")
+
     train_ds, val_ds, test_ds, stats, valid_mask = load_datasets()
-    model = ResidualUNet(in_channels=train_ds.input_tensor.shape[1], base_channels=ckpt["args"]["base_channels"]).to(device)
+    model = ResidualUNet(in_channels=train_ds.input_tensor.shape[1], base_channels=ckpt_config["base_channels"]).to(device)
     model.load_state_dict(ckpt["model_state"])
 
     print("Running U-Net over the real test set...")
