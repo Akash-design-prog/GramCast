@@ -12,6 +12,11 @@ __pycache__/
 venv/
 .env
 
+# model checkpoints and training logs — large, regenerable by re-running ml/train.py
+ml/checkpoints/
+ml/logs/
+*.pt
+
 # internal planning/log/guidance files — not for GitHub
 DEV_LOG.md
 docs/ISSUES_PLAN.md
