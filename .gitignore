@@ -17,6 +17,9 @@ ml/checkpoints/
 ml/logs/
 *.pt
 
+# scratch test folders used to verify code (e.g. extracting/smoke-testing a Kaggle notebook locally)
+_scratch_*/
+
 # internal planning/log/guidance files — not for GitHub
 DEV_LOG.md
 docs/ISSUES_PLAN.md
