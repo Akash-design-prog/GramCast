@@ -1,7 +1,9 @@
-"""Training loop for the residual U-Net, with per-epoch CSV experiment logging and frequent checkpointing -
-per the project guide's own advice: "Save checkpoints often because free sessions can disconnect" (Colab/Kaggle).
+"""Training loop for the residual U-Net (P10/P50/P90 quantile heads), with per-epoch CSV experiment logging,
+frequent checkpointing, and resume support - per the project guide's own advice: "Save checkpoints often
+because free sessions can disconnect" (Colab/Kaggle). Resume exists specifically because that advice is
+meaningless if a session can't actually pick back up from a saved checkpoint.
 
-Usage: python ml/train.py [--epochs N] [--lr LR] [--batch-size B] [--run-name NAME]
+Usage: python ml/train.py [--epochs N] [--lr LR] [--batch-size B] [--run-name NAME] [--resume PATH]
 """
 import argparse
 import csv
@@ -15,7 +17,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).resolve().parent / "model"))
 from dataset import load_datasets
 from unet import ResidualUNet
-from loss import HeavyRainWeightedLoss
+from quantile_loss import QuantileHeavyRainLoss
 
 CHECKPOINT_DIR = Path(__file__).resolve().parent / "checkpoints"
 LOG_DIR = Path(__file__).resolve().parent / "logs"
@@ -33,8 +35,8 @@ def run_epoch(model, loader, loss_fn, mask, device, optimizer=None):
         truth = batch["truth"].to(device)
 
         with torch.set_grad_enabled(is_train):
-            pred = model.predict_rainfall(x, bicubic_raw, coarse_nn_raw)
-            loss = loss_fn(pred, truth, mask)
+            preds = model.predict_quantiles(x, bicubic_raw, coarse_nn_raw)
+            loss = loss_fn(preds, truth, mask)
 
         if is_train:
             optimizer.zero_grad()
@@ -55,6 +57,7 @@ def main():
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--base-channels", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--resume", type=str, default=None, help="path to a *_last.pt checkpoint to resume from")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -73,16 +76,29 @@ def main():
 
     mask = torch.from_numpy(valid_mask).to(device)
     model = ResidualUNet(in_channels=train_ds.input_tensor.shape[1], base_channels=args.base_channels).to(device)
-    loss_fn = HeavyRainWeightedLoss()
+    loss_fn = QuantileHeavyRainLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    start_epoch = 1
     best_val_loss = float("inf")
+    log_mode = "w"
 
-    with open(log_path, "w", newline="") as f:
+    if args.resume:
+        print(f"Resuming from {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state"])
+        optimizer.load_state_dict(ckpt["optimizer_state"])
+        start_epoch = ckpt["epoch"] + 1
+        best_val_loss = ckpt.get("best_val_loss", ckpt["val_loss"])
+        log_mode = "a"  # append to the existing log instead of overwriting
+        print(f"Resumed at epoch {start_epoch}, best_val_loss so far: {best_val_loss:.4f}")
+
+    with open(log_path, log_mode, newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["epoch", "train_loss", "val_loss", "lr", "batch_size", "base_channels", "seed", "timestamp", "elapsed_s"])
+        if log_mode == "w":
+            writer.writerow(["epoch", "train_loss", "val_loss", "lr", "batch_size", "base_channels", "seed", "timestamp", "elapsed_s"])
 
-        for epoch in range(1, args.epochs + 1):
+        for epoch in range(start_epoch, args.epochs + 1):
             t0 = time.time()
             train_loss = run_epoch(model, train_loader, loss_fn, mask, device, optimizer)
             val_loss = run_epoch(model, val_loader, loss_fn, mask, device, optimizer=None)
@@ -92,18 +108,19 @@ def main():
             writer.writerow([epoch, train_loss, val_loss, args.lr, args.batch_size, args.base_channels, args.seed, time.strftime("%Y-%m-%d %H:%M:%S"), f"{elapsed:.1f}"])
             f.flush()
 
-            # checkpoint every epoch (not just best) - free-tier sessions can disconnect without warning
-            torch.save(
-                {"epoch": epoch, "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
-                 "val_loss": val_loss, "stats": stats, "args": vars(args)},
-                CHECKPOINT_DIR / f"{run_name}_last.pt",
-            )
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 torch.save(
                     {"epoch": epoch, "model_state": model.state_dict(), "val_loss": val_loss, "stats": stats, "args": vars(args)},
                     CHECKPOINT_DIR / f"{run_name}_best.pt",
                 )
+
+            # checkpoint every epoch (not just best) - free-tier sessions can disconnect without warning
+            torch.save(
+                {"epoch": epoch, "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
+                 "val_loss": val_loss, "best_val_loss": best_val_loss, "stats": stats, "args": vars(args)},
+                CHECKPOINT_DIR / f"{run_name}_last.pt",
+            )
 
     print(f"Done. Best val_loss: {best_val_loss:.4f}. Log: {log_path}")
 
