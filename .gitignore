@@ -17,6 +17,9 @@ ml/checkpoints/
 ml/logs/
 *.pt
 
+# raw Kaggle GPU run outputs (zips downloaded from the notebook's Output tab) — large, regenerable
+notebooks/Outputs/
+
 # scratch test folders used to verify code (e.g. extracting/smoke-testing a Kaggle notebook locally)
 _scratch_*/
 
