@@ -42,6 +42,15 @@ def build_input_tensor(coarse_bicubic: np.ndarray, terrain: dict, stats: dict) -
     aspect_sin = np.sin(aspect_rad)
     aspect_cos = np.cos(aspect_rad)
 
+    unknown_mask = ~np.isin(terrain["worldcover"], WORLDCOVER_CLASSES)
+    if unknown_mask.any():
+        unknown_classes = sorted(set(terrain["worldcover"][unknown_mask].tolist()))
+        raise ValueError(
+            f"WorldCover class(es) {unknown_classes} not in WORLDCOVER_CLASSES {WORLDCOVER_CLASSES} - "
+            "these pixels would silently get an all-zero one-hot (invisible to the network) if not caught here. "
+            "Add the missing class(es) to WORLDCOVER_CLASSES."
+        )
+
     static_channels = [dem_norm, slope_norm, aspect_sin, aspect_cos]
     for cls in WORLDCOVER_CLASSES:
         static_channels.append((terrain["worldcover"] == cls).astype("float32"))
