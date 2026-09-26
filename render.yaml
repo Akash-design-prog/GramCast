@@ -1,0 +1,24 @@
+# Render blueprint for the GramCast FastAPI backend (SIH26074).
+# Deploy: render.com -> New -> Blueprint -> connect Akash-design-prog/GramCast -> Render reads this file.
+#
+# Required env vars to set in Render's dashboard after the first deploy (not committed here - secrets):
+#   GRAMCAST_DATA_BUNDLE_URL   - the GitHub Release asset URL for gramcast_deploy_bundle.zip
+#                                (see scripts/prepare_deploy_bundle.py)
+#   BHASHINI_USER_ID           - optional, only if Bhashini registration has been approved
+#   BHASHINI_API_KEY           - optional, same as above - omit both and the app falls back to gTTS automatically
+services:
+  - type: web
+    name: gramcast-api
+    runtime: python
+    plan: free
+    region: singapore  # closest free-tier region to India at time of writing; change if Render adds a closer one
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: GRAMCAST_DATA_BUNDLE_URL
+        sync: false
+      - key: BHASHINI_USER_ID
+        sync: false
+      - key: BHASHINI_API_KEY
+        sync: false
