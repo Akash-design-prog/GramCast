@@ -26,6 +26,19 @@ def client():
         yield c
 
 
+def test_cors_allows_dashboard_dev_origin(client):
+    """The dashboard runs on a different origin (Vite on :5173) than the API (:8000) - without CORS
+    headers the browser silently blocks every fetch, which is exactly what happened during frontend
+    integration (curl succeeded, the browser fetch failed with no useful error)."""
+    r = client.get("/health", headers={"Origin": "http://localhost:5173"})
+    assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_cors_rejects_unknown_origin(client):
+    r = client.get("/health", headers={"Origin": "http://evil.example.com"})
+    assert "access-control-allow-origin" not in {k.lower() for k in r.headers}
+
+
 def test_health(client):
     r = client.get("/health")
     assert r.status_code == 200
@@ -115,6 +128,70 @@ def test_forecast_extreme_out_of_range_lat_lon_does_not_crash(client):
     r = client.get("/forecast", params={"lat": 200.0, "lon": 500.0, "date": "2023-07-15"})
     assert r.status_code == 200
     assert r.json()["village"]["matched_by"] == "nearest_centroid_fallback"
+
+
+def test_forecast_map_happy_path(client):
+    r = client.get("/forecast/map", params={"date": "2023-07-15"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["type"] == "FeatureCollection"
+    assert body["date"] == "2023-07-15"
+    assert len(body["features"]) == 2003  # full Pune district village count
+    feature = body["features"][0]
+    assert feature["type"] == "Feature"
+    assert feature["geometry"]["type"] in ("Polygon", "MultiPolygon")
+    assert feature["id"] == 0
+    props = feature["properties"]
+    for key in ("name", "sub_district", "block_mm", "p10_mm", "p50_mm", "p90_mm"):
+        assert key in props
+
+
+def test_forecast_map_feature_ids_are_unique_and_sequential(client):
+    """Regression test for a real bug: the dashboard used to highlight a clicked village by NAME, but
+    383/2003 villages share a name with at least one other village elsewhere in the district (e.g.
+    'Shindewadi' appears in 6 different talukas) - clicking one lit up every same-named village on the
+    map. Every feature needs a genuinely unique id (NAME and NAME+SUB_DIST both fail this - see
+    bulk_village_stats' own docstring), so the map can highlight exactly the one polygon clicked."""
+    r = client.get("/forecast/map", params={"date": "2023-07-15"})
+    ids = [f["id"] for f in r.json()["features"]]
+    assert ids == list(range(2003))
+    assert len(set(ids)) == len(ids)
+
+
+def test_forecast_map_unknown_date_returns_404(client):
+    r = client.get("/forecast/map", params={"date": "1900-01-01"})
+    assert r.status_code == 404
+
+
+def test_forecast_map_missing_date_returns_422(client):
+    r = client.get("/forecast/map")
+    assert r.status_code == 422
+
+
+def test_forecast_map_quantiles_ordered_for_every_covered_village(client):
+    """Full-scale check across the whole district, not a handful of villages: wherever a village has
+    real coverage, P10 <= P50 <= P90 must hold after the GeoJSON round trip."""
+    r = client.get("/forecast/map", params={"date": "2023-07-15"})
+    body = r.json()
+    checked = 0
+    for feature in body["features"]:
+        p = feature["properties"]
+        if p["p10_mm"] is None or p["p50_mm"] is None or p["p90_mm"] is None:
+            continue
+        assert p["p10_mm"] <= p["p50_mm"] + 1e-6
+        assert p["p50_mm"] <= p["p90_mm"] + 1e-6
+        checked += 1
+    assert checked > 1900  # nearly every village should have real coverage (100% per zonal_stats.py)
+
+
+def test_forecast_map_values_are_json_numbers_not_nan(client):
+    """json.dumps would silently emit the invalid literal NaN for an uncleaned float - every value must
+    already be a finite number or an explicit null."""
+    r = client.get("/forecast/map", params={"date": "2023-07-15"})
+    for feature in r.json()["features"]:
+        for key in ("block_mm", "p10_mm", "p50_mm", "p90_mm"):
+            v = feature["properties"][key]
+            assert v is None or (isinstance(v, (int, float)) and v == v)  # v == v is False only for NaN
 
 
 def test_feedback_long_unicode_reply_text_logs_successfully(client):
