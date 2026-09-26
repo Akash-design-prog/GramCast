@@ -58,6 +58,20 @@ def test_predict_day_block_value_is_flat_within_blocks(inference):
             assert np.allclose(patch, patch[0, 0]), f"block at ({r0},{c0}) is not flat"
 
 
+def test_stress_100_random_dates_no_crashes(inference):
+    """Full-scale stress test, same discipline as the data pipeline/ML stress tests - 100 random dates
+    spanning the whole dataset (not just one hand-picked day), checking shape/NaN/monotonicity every time."""
+    rng = np.random.default_rng(42)
+    sample_dates = rng.choice(inference.available_dates(), size=100, replace=False)
+    for d in sample_dates:
+        result = inference.predict_day(d)
+        for key in ["p10", "p50", "p90"]:
+            assert result[key].shape == (35, 50)
+            assert not np.isnan(result[key]).any()
+        assert (result["p10"] <= result["p50"] + 1e-4).all()
+        assert (result["p50"] <= result["p90"] + 1e-4).all()
+
+
 def test_different_dates_give_different_predictions(inference):
     """Sanity check that the model is actually conditioning on the day's real input, not returning a
     cached/constant output regardless of date."""

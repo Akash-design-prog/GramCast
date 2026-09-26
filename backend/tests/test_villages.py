@@ -53,6 +53,17 @@ def test_panchayat_value_monotonic_with_synthetic_grid(village_index):
     assert result["max_mm"] == pytest.approx(7.5)
 
 
+def test_stress_100_random_real_village_centroids_all_match_within(village_index):
+    """Full-scale stress test: every village's own centroid must resolve via true point-in-polygon
+    containment ('within'), not the fallback - across 100 random real villages, not just 2 hand-picked
+    ones. A regression here would mean the predicate bug (or something like it) came back."""
+    sample = village_index.villages.sample(n=100, random_state=7)
+    for _, row in sample.iterrows():
+        centroid = row.geometry.centroid
+        result = village_index.find(centroid.y, centroid.x)
+        assert result["matched_by"] == "within", f"{row['NAME']} centroid did not match via containment"
+
+
 def test_panchayat_value_unknown_village_raises():
     grid = np.zeros((35, 50), dtype="float32")
     with pytest.raises(ValueError, match="not found"):
