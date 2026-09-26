@@ -112,6 +112,55 @@ def check_terrain() -> None:
     )
 
 
+def check_era5_training_pairs() -> None:
+    print("\n--- ERA5 humidity/wind (aligned to training grid) ---")
+    path = DATA_DIR / "processed" / "training_pairs" / "era5_humidity_wind.npz"
+    if not path.exists():
+        check("era5_humidity_wind.npz exists", False, "not found - run resample_era5_to_training_grid.py")
+        return
+    era5 = np.load(path)
+    dates = np.load(DATA_DIR / "processed" / "training_pairs" / "dates.npy")
+    valid_mask = np.load(DATA_DIR / "processed" / "training_pairs" / "valid_mask.npy")
+
+    check("era5 has all 3 channels", set(era5.keys()) == {"valid_mask", "humidity_proxy", "wind_u", "wind_v"})
+    check("era5 per-day coverage matches dates.npy", bool(era5["valid_mask"].all()) and len(era5["valid_mask"]) == len(dates))
+
+    for name in ["humidity_proxy", "wind_u", "wind_v"]:
+        arr = era5[name]
+        check(f"{name} shape matches training set", arr.shape == (len(dates), 35, 50), str(arr.shape))
+        check(f"{name} no NaN anywhere (source water-body gaps are filled)", not np.isnan(arr).any())
+        check(f"{name} no NaN at spatially-valid pixels", not np.isnan(arr[:, valid_mask]).any())
+    hum = era5["humidity_proxy"]
+    check("humidity_proxy (dewpoint K) range sane", 270 < hum.min() and hum.max() < 310, f"[{hum.min():.1f}, {hum.max():.1f}]")
+    for name in ["wind_u", "wind_v"]:
+        w = era5[name]
+        check(f"{name} range sane (<50 m/s)", abs(w).max() < 50, f"max abs {abs(w).max():.2f}")
+
+    # STRUCTURAL cross-array orientation check - same bug class as the DEM one above (see 2026-09-25 entry),
+    # re-applied here since ERA5's own latitude convention is independently descending (north-first),
+    # the same mismatch that corrupted terrain once. A single-point sanity check can pass by luck (as the
+    # DEM one originally did); compare full rows against a direct recompute from the raw ERA5 file instead.
+    idx = int(np.where(dates == "1981-06-01")[0][0])
+    raw_path = DATA_DIR / "raw" / "era5" / "era5_pune_1981.nc"
+    if raw_path.exists():
+        ds = xr.open_dataset(raw_path)
+        raw_day = ds["d2m"].sel(valid_time="1981-06-01").mean(dim="valid_time").values
+        ds.close()
+        south_raw_mean = float(np.nanmean(raw_day[-3:, :]))
+        north_raw_mean = float(np.nanmean(raw_day[:3, :]))
+        our_row0_mean = float(np.nanmean(hum[idx, 0, :]))
+        our_last_row_mean = float(np.nanmean(hum[idx, -1, :]))
+        row0_is_south = abs(our_row0_mean - south_raw_mean) < abs(our_row0_mean - north_raw_mean)
+        last_row_is_north = abs(our_last_row_mean - north_raw_mean) < abs(our_last_row_mean - south_raw_mean)
+        check(
+            "ERA5 orientation structurally correct (row 0 = south, last row = north, cross-checked against raw source)",
+            row0_is_south and last_row_is_north,
+            f"row0={our_row0_mean:.2f} (raw south={south_raw_mean:.2f}, raw north={north_raw_mean:.2f})",
+        )
+    else:
+        check("ERA5 orientation structural check", False, f"raw file {raw_path.name} not found to cross-check against")
+
+
 def check_training_pairs() -> None:
     print("\n--- Training pairs ---")
     fine = np.load(DATA_DIR / "processed" / "training_pairs" / "fine_rainfall.npy")
@@ -152,6 +201,7 @@ def main() -> None:
     check_imd()
     check_era5()
     check_terrain()
+    check_era5_training_pairs()
     check_training_pairs()
     check_crs()
 
