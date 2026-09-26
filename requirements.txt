@@ -29,6 +29,7 @@ requests
 
 # Voice / TTS
 gTTS
+requests  # Bhashini API client (backend/bhashini_tts.py)
 
 # Utilities
 python-dotenv
