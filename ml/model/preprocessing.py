@@ -21,20 +21,36 @@ TRAINING_PAIRS_DIR = Path(__file__).resolve().parents[2] / "data" / "processed" 
 WORLDCOVER_CLASSES = [10, 20, 30, 40, 50, 60, 80, 90, 95]
 
 
-def compute_normalization_stats(terrain: dict, coarse_bicubic_train: np.ndarray) -> dict:
-    """Stats from TRAIN data only."""
-    return {
+ERA5_CHANNELS = ["humidity_proxy", "wind_u", "wind_v"]
+
+
+def compute_normalization_stats(terrain: dict, coarse_bicubic_train: np.ndarray, era5_train: dict) -> dict:
+    """Stats from TRAIN data only - now also covers the ERA5 channels (era5_train must already be sliced
+    to the train indices by the caller, same convention as coarse_bicubic_train)."""
+    stats = {
         "dem_mean": float(terrain["dem"].mean()), "dem_std": float(terrain["dem"].std()),
         "slope_mean": float(terrain["slope"].mean()), "slope_std": float(terrain["slope"].std()),
         "rain_mean": float(coarse_bicubic_train.mean()), "rain_std": float(coarse_bicubic_train.std()),
     }
+    for name in ERA5_CHANNELS:
+        arr = era5_train[name]
+        stats[f"{name}_mean"] = float(arr.mean())
+        stats[f"{name}_std"] = float(arr.std())
+    return stats
 
 
-def build_input_tensor(coarse_bicubic: np.ndarray, terrain: dict, stats: dict) -> np.ndarray:
-    """coarse_bicubic: (T, H, W). terrain arrays: (H, W), time-invariant, tiled across T.
-    Returns (T, C, H, W) float32 - channel order: [rain, dem, slope, aspect_sin, aspect_cos, *worldcover_onehot]
+def build_input_tensor(coarse_bicubic: np.ndarray, terrain: dict, stats: dict, era5: dict) -> np.ndarray:
+    """coarse_bicubic: (T, H, W). terrain arrays: (H, W), time-invariant, tiled across T. era5: dict of
+    (T, H, W) arrays (humidity_proxy, wind_u, wind_v), already sliced to the same T/day-index subset as
+    coarse_bicubic by the caller (same convention GramCastDataset already uses for fine/coarse_bicubic).
+    Returns (T, C, H, W) float32 - channel order:
+    [rain, humidity_proxy, wind_u, wind_v, dem, slope, aspect_sin, aspect_cos, *worldcover_onehot]
     """
     T, H, W = coarse_bicubic.shape
+    for name in ERA5_CHANNELS:
+        if era5[name].shape != (T, H, W):
+            raise ValueError(f"era5['{name}'] shape {era5[name].shape} doesn't match coarse_bicubic's {(T, H, W)} - caller must slice era5 to the same day-index subset")
+
     rain_norm = (coarse_bicubic - stats["rain_mean"]) / stats["rain_std"]
     dem_norm = (terrain["dem"] - stats["dem_mean"]) / stats["dem_std"]
     slope_norm = (terrain["slope"] - stats["slope_mean"]) / stats["slope_std"]
@@ -51,20 +67,23 @@ def build_input_tensor(coarse_bicubic: np.ndarray, terrain: dict, stats: dict) -
             "Add the missing class(es) to WORLDCOVER_CLASSES."
         )
 
+    time_varying_channels = [rain_norm] + [(era5[name] - stats[f"{name}_mean"]) / stats[f"{name}_std"] for name in ERA5_CHANNELS]
     static_channels = [dem_norm, slope_norm, aspect_sin, aspect_cos]
     for cls in WORLDCOVER_CLASSES:
         static_channels.append((terrain["worldcover"] == cls).astype("float32"))
 
-    n_channels = 1 + len(static_channels)
+    n_channels = len(time_varying_channels) + len(static_channels)
     tensor = np.empty((T, n_channels, H, W), dtype="float32")
-    tensor[:, 0, :, :] = rain_norm
+    for i, ch in enumerate(time_varying_channels):
+        tensor[:, i, :, :] = ch
+    offset = len(time_varying_channels)
     for i, ch in enumerate(static_channels):
-        tensor[:, i + 1, :, :] = np.tile(ch, (T, 1, 1))
+        tensor[:, offset + i, :, :] = np.tile(ch, (T, 1, 1))
     return tensor
 
 
 def channel_names() -> list[str]:
-    return ["rain_bicubic", "dem", "slope", "aspect_sin", "aspect_cos"] + [f"worldcover_{c}" for c in WORLDCOVER_CLASSES]
+    return ["rain_bicubic"] + ERA5_CHANNELS + ["dem", "slope", "aspect_sin", "aspect_cos"] + [f"worldcover_{c}" for c in WORLDCOVER_CLASSES]
 
 
 if __name__ == "__main__":
