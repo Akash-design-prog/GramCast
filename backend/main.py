@@ -11,7 +11,11 @@ from pathlib import Path
 
 from contextlib import asynccontextmanager
 
+import math
+import os
+
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -19,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap_data import ensure_data_available
 from inference import GramCastInference
-from villages import VillageIndex, panchayat_value
+from villages import VillageIndex, bulk_village_stats, panchayat_value_by_index
 from advisory.rules import CropStage, generate_advisory
 from tts import SUPPORTED_LANGUAGES, synthesize_speech
 from feedback import log_feedback
@@ -40,6 +44,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="GramCast API", description="SIH26074 - block-to-panchayat rainfall downscaling", lifespan=lifespan)
+
+# The dashboard (frontend/dashboard) is a separate origin (Vite dev server on :5173, a different static
+# host in production) - the browser blocks the cross-origin fetch without this. GRAMCAST_DASHBOARD_ORIGINS
+# lets the deployed origin be set via env var; the two local dev ports are always allowed so `npm run dev`
+# works out of the box.
+_default_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+_extra_origins = [o.strip() for o in os.environ.get("GRAMCAST_DASHBOARD_ORIGINS", "").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_default_origins + _extra_origins,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
@@ -72,12 +89,13 @@ def _compute_forecast(lat: float, lon: float, date: str, crop_stage: str | None)
             valid = [s.value for s in CropStage]
             raise HTTPException(status_code=400, detail=f"crop_stage must be one of {valid}, got '{crop_stage}'")
 
+    row_index = village["row_index"]
     panchayat = {
-        "p10": panchayat_value(pred["p10"], village["name"], village["sub_district"], date),
-        "p50": panchayat_value(pred["p50"], village["name"], village["sub_district"], date),
-        "p90": panchayat_value(pred["p90"], village["name"], village["sub_district"], date),
+        "p10": panchayat_value_by_index(pred["p10"], row_index),
+        "p50": panchayat_value_by_index(pred["p50"], row_index),
+        "p90": panchayat_value_by_index(pred["p90"], row_index),
     }
-    block = panchayat_value(pred["block_value"], village["name"], village["sub_district"], date)
+    block = panchayat_value_by_index(pred["block_value"], row_index)
 
     advisory = generate_advisory(
         p10=panchayat["p10"]["mean_mm"],
@@ -87,7 +105,7 @@ def _compute_forecast(lat: float, lon: float, date: str, crop_stage: str | None)
     )
 
     return {
-        "village": village,
+        "village": {k: v for k, v in village.items() if k != "row_index"},  # internal detail, not API contract
         "date": date,
         "block_level_mm": block["mean_mm"],
         "panchayat_level": {
@@ -125,6 +143,54 @@ def forecast_voice(
     return Response(content=audio_bytes, media_type=media_type, headers={"X-TTS-Engine": engine})
 
 
+@app.get("/forecast/map")
+def forecast_map(
+    date: str = Query(..., description="Date in the historical dataset, YYYY-MM-DD"),
+):
+    """Every village's block-level and panchayat-level (P10/P50/P90) rainfall for one day, as a single
+    GeoJSON FeatureCollection - the dashboard's map layer needs the whole district in one request, not
+    one round trip per village (see docs/ISSUES_PLAN.md, frontend bucket)."""
+    if _inference is None or _village_index is None:
+        raise HTTPException(status_code=503, detail="Models not loaded yet")
+
+    try:
+        pred = _inference.predict_day(date)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    stats = bulk_village_stats(pred)
+
+    def _clean(value: float) -> float | None:
+        return None if value is None or math.isnan(value) else round(float(value), 2)
+
+    features = []
+    for i, (_, row) in enumerate(stats.iterrows()):
+        features.append({
+            "type": "Feature",
+            # A stable per-row index, NOT a business key - NAME alone repeats 383/2003 times across the
+            # district (e.g. "Shindewadi" appears in 6 different talukas) and NAME+SUB_DIST isn't unique
+            # either (see bulk_village_stats' own docstring). The dashboard's map needs a real unique id
+            # per polygon to highlight the one actually clicked instead of every village sharing its name.
+            "id": i,
+            "geometry": row.geometry.__geo_interface__,
+            "properties": {
+                "name": row["NAME"],
+                "sub_district": row["SUB_DIST"],
+                "block_mm": _clean(row["block_mm"]),
+                "p10_mm": _clean(row["p10_mm"]),
+                "p50_mm": _clean(row["p50_mm"]),
+                "p90_mm": _clean(row["p90_mm"]),
+            },
+        })
+
+    return {
+        "type": "FeatureCollection",
+        "date": date,
+        "model": {"checkpoint": pred["checkpoint"], "epoch": pred["checkpoint_epoch"]},
+        "features": features,
+    }
+
+
 class FeedbackIn(BaseModel):
     lat: float
     lon: float
@@ -145,7 +211,7 @@ def feedback(body: FeedbackIn):
         pred = _inference.predict_day(body.date)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    p50 = panchayat_value(pred["p50"], village["name"], village["sub_district"], body.date)["mean_mm"]
+    p50 = panchayat_value_by_index(pred["p50"], village["row_index"])["mean_mm"]
 
     try:
         row = log_feedback(village["name"], village["sub_district"], body.date, p50, body.reply_text)
