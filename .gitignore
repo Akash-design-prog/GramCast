@@ -20,6 +20,9 @@ ml/logs/
 # raw Kaggle GPU run outputs (zips downloaded from the notebook's Output tab) — large, regenerable
 notebooks/Outputs/
 
+# deployment data bundle (uploaded as a GitHub Release asset instead, see scripts/prepare_deploy_bundle.py)
+gramcast_deploy_bundle.zip
+
 # scratch test folders used to verify code (e.g. extracting/smoke-testing a Kaggle notebook locally)
 _scratch_*/
 
