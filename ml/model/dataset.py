@@ -18,12 +18,13 @@ TRAINING_PAIRS_DIR = Path(__file__).resolve().parents[2] / "data" / "processed" 
 
 
 class GramCastDataset(Dataset):
-    def __init__(self, indices: np.ndarray, fine: np.ndarray, coarse_bicubic: np.ndarray, terrain: dict, stats: dict):
+    def __init__(self, indices: np.ndarray, fine: np.ndarray, coarse_bicubic: np.ndarray, terrain: dict, stats: dict, era5: dict):
         self.indices = indices
         self.fine = fine[indices]
         self.coarse_bicubic = coarse_bicubic[indices]
         self.coarse_nn = nn_predict(self.fine)  # target for mass-conservation - recomputed from fine, matches build_training_pairs.py's own coarsening logic
-        self.input_tensor = build_input_tensor(self.coarse_bicubic, terrain, stats)
+        era5_sliced = {name: arr[indices] for name, arr in era5.items()}
+        self.input_tensor = build_input_tensor(self.coarse_bicubic, terrain, stats, era5_sliced)
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -43,12 +44,15 @@ def load_datasets():
     splits = np.load(TRAINING_PAIRS_DIR / "split_indices.npz")
     terrain = dict(np.load(TRAINING_PAIRS_DIR / "terrain_static.npz"))
     valid_mask = np.load(TRAINING_PAIRS_DIR / "valid_mask.npy")
+    era5_npz = np.load(TRAINING_PAIRS_DIR / "era5_humidity_wind.npz")
+    era5 = {name: era5_npz[name] for name in ["humidity_proxy", "wind_u", "wind_v"]}
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from preprocessing import compute_normalization_stats
-    stats = compute_normalization_stats(terrain, coarse_bicubic[splits["train"]])
+    era5_train = {name: arr[splits["train"]] for name, arr in era5.items()}
+    stats = compute_normalization_stats(terrain, coarse_bicubic[splits["train"]], era5_train)
 
-    train_ds = GramCastDataset(splits["train"], fine, coarse_bicubic, terrain, stats)
-    val_ds = GramCastDataset(splits["val"], fine, coarse_bicubic, terrain, stats)
-    test_ds = GramCastDataset(splits["test"], fine, coarse_bicubic, terrain, stats)
+    train_ds = GramCastDataset(splits["train"], fine, coarse_bicubic, terrain, stats, era5)
+    val_ds = GramCastDataset(splits["val"], fine, coarse_bicubic, terrain, stats, era5)
+    test_ds = GramCastDataset(splits["test"], fine, coarse_bicubic, terrain, stats, era5)
     return train_ds, val_ds, test_ds, stats, valid_mask
