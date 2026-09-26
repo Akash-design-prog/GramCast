@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "model"))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "baselines"))
 from dataset import load_datasets
 from unet import ResidualUNet
+from preprocessing import ERA5_CHANNELS
 from metrics import full_report
 from nearest_neighbor import predict as nn_predict
 from elevation_aware_regression import build_features
@@ -39,8 +40,11 @@ def coverage_check(p10: np.ndarray, p90: np.ndarray, truth: np.ndarray, mask: np
     return {"coverage_80_target": coverage, "below_p10_frac": below_p10, "above_p90_frac": above_p90}
 
 
-def get_unet_predictions(model, ds, device) -> dict:
-    """Run the model over the full dataset in batches, return {p10, p50, p90} as (T,35,50) numpy arrays."""
+def get_unet_predictions(model, ds, device, channel_indices=None) -> dict:
+    """Run the model over the full dataset in batches, return {p10, p50, p90} as (T,35,50) numpy arrays.
+    channel_indices: if given, selects a subset of ds's input channels before feeding the model - lets a
+    checkpoint trained BEFORE a new input channel was added (e.g. pre-ERA5) still be evaluated against
+    today's dataset build, by dropping down to the channel subset it actually expects."""
     from torch.utils.data import DataLoader
 
     loader = DataLoader(ds, batch_size=64, shuffle=False)
@@ -48,7 +52,10 @@ def get_unet_predictions(model, ds, device) -> dict:
     model.eval()
     with torch.no_grad():
         for batch in loader:
-            x = batch["x"].to(device)
+            x = batch["x"]
+            if channel_indices is not None:
+                x = x[:, channel_indices]
+            x = x.to(device)
             bicubic_raw = batch["bicubic_raw"].to(device)
             coarse_nn_raw = batch["coarse_nn_raw"].to(device)
             q = model.predict_quantiles(x, bicubic_raw, coarse_nn_raw)
@@ -79,11 +86,35 @@ def main():
         raise KeyError("checkpoint has neither 'args' nor 'config' key - unrecognized checkpoint schema")
 
     train_ds, val_ds, test_ds, stats, valid_mask = load_datasets()
-    model = ResidualUNet(in_channels=train_ds.input_tensor.shape[1], base_channels=ckpt_config["base_channels"]).to(device)
+    full_channels = train_ds.input_tensor.shape[1]
+
+    # Backward compatibility: a checkpoint trained before a new input channel was added (e.g. the
+    # ERA5 humidity/wind channels added 2026-09-26) expects fewer channels than today's dataset build
+    # produces. Detect the mismatch from the checkpoint's own first-layer weight shape (ground truth
+    # for what it actually expects, not an assumption) and drop the extra channels rather than fail.
+    ckpt_in_channels = ckpt["model_state"]["enc1.block.0.weight"].shape[1]
+    if ckpt_in_channels == full_channels:
+        channel_indices = None
+    elif ckpt_in_channels == full_channels - len(ERA5_CHANNELS):
+        print(
+            f"NOTE: checkpoint expects {ckpt_in_channels} input channels, current dataset build produces "
+            f"{full_channels} (includes ERA5 humidity/wind, added 2026-09-26) - evaluating this pre-ERA5 "
+            "checkpoint on the matching channel subset (rain + terrain/worldcover, ERA5 channels excluded)."
+        )
+        era5_start = 1  # channel order: [rain, *era5, dem, slope, aspect_sin, aspect_cos, *worldcover]
+        channel_indices = [0] + list(range(era5_start + len(ERA5_CHANNELS), full_channels))
+    else:
+        raise ValueError(
+            f"checkpoint expects {ckpt_in_channels} input channels, but that matches neither the current "
+            f"dataset build ({full_channels}) nor the known pre-ERA5 layout ({full_channels - len(ERA5_CHANNELS)}) - "
+            "unrecognized channel layout, can't safely evaluate this checkpoint."
+        )
+
+    model = ResidualUNet(in_channels=ckpt_in_channels, base_channels=ckpt_config["base_channels"]).to(device)
     model.load_state_dict(ckpt["model_state"])
 
     print("Running U-Net over the real test set...")
-    unet_preds = get_unet_predictions(model, test_ds, device)
+    unet_preds = get_unet_predictions(model, test_ds, device, channel_indices=channel_indices)
 
     fine = np.load(TRAINING_PAIRS_DIR / "fine_rainfall.npy")
     coarse_bicubic = np.load(TRAINING_PAIRS_DIR / "coarse_rainfall_bicubic.npy")
