@@ -47,6 +47,7 @@ class GramCastInference:
         self.stats = compute_normalization_stats(self.terrain, self.coarse_bicubic[train_idx], era5_train)
 
         self._date_to_idx = {str(d): i for i, d in enumerate(self.dates)}
+        self._sorted_dates = sorted(self._date_to_idx.keys())
 
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         ckpt_config = ckpt.get("args") or ckpt.get("config")
@@ -70,6 +71,12 @@ class GramCastInference:
 
     def available_dates(self) -> list[str]:
         return list(self._date_to_idx.keys())
+
+    def sorted_available_dates(self) -> list[str]:
+        """Same dates as available_dates(), pre-sorted once at load time - the /dates endpoint (and
+        anything else that wants a real chronological list, e.g. the frontend date picker) doesn't need
+        to re-sort all 5,582 strings on every single call."""
+        return self._sorted_dates
 
     def predict_day(self, date_str: str) -> dict:
         """Returns a dict of (35, 50) south-ascending float32 arrays: p10, p50, p90, block_value
