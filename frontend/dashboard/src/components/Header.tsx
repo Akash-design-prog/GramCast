@@ -1,12 +1,25 @@
+import DatePicker from "./DatePicker";
+import VillageSearch, { type SearchEntry } from "./VillageSearch";
+
 interface Props {
-  dayLabels: string[];
-  activeDay: number;
-  onDayChange: (index: number) => void;
+  selectedDate: string;
+  onDateChange: (date: string) => void;
+  availableDates: string[];
+  searchEntries: SearchEntry[];
+  onSearchSelect: (entry: SearchEntry) => void;
   theme: "light" | "dark";
   onToggleTheme: () => void;
 }
 
-export default function Header({ dayLabels, activeDay, onDayChange, theme, onToggleTheme }: Props) {
+export default function Header({
+  selectedDate,
+  onDateChange,
+  availableDates,
+  searchEntries,
+  onSearchSelect,
+  theme,
+  onToggleTheme,
+}: Props) {
   return (
     <header className="header">
       <div className="brand">
@@ -23,13 +36,8 @@ export default function Header({ dayLabels, activeDay, onDayChange, theme, onTog
         </div>
       </div>
       <div className="header-actions">
-        <div className="day-pills">
-          {dayLabels.map((label, i) => (
-            <button key={label} className={`day-pill${i === activeDay ? " active" : ""}`} onClick={() => onDayChange(i)}>
-              {label}
-            </button>
-          ))}
-        </div>
+        <VillageSearch entries={searchEntries} onSelect={onSearchSelect} />
+        <DatePicker value={selectedDate} onChange={onDateChange} availableDates={availableDates} />
         <button className="theme-btn" onClick={onToggleTheme} aria-label="Toggle theme" title="Toggle theme">
           {theme === "dark" ? (
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
