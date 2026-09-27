@@ -67,6 +67,45 @@ def test_find_far_outside_district_uses_fallback(village_index):
     assert result["name"] is not None  # still returns a real answer, not an error
 
 
+def test_find_by_name_fragment_matches_real_village_in_a_sentence(village_index):
+    result = village_index.find_by_name_fragment("how about Pashan today")
+    assert result is not None
+    assert result["name"] == "Pashan"
+
+
+def test_find_by_name_fragment_no_village_named_returns_none():
+    """Regression test for a real bug: 45/2003 villages have a BLANK NAME in the source boundaries
+    file, and an unguarded `"" in text` substring check is always True in Python - every one of these
+    ordinary sentences with no real village name in them used to match the first blank-named village by
+    row order instead of correctly returning None."""
+    village_index = VillageIndex()
+    for text in ["weather", "no rain fell here today", "hello there", "   ", "forecast please"]:
+        assert village_index.find_by_name_fragment(text) is None, f"false match for {text!r}"
+
+
+def test_find_by_name_fragment_prefers_longest_match():
+    """If one real village name is itself a substring of another (e.g. a short name embedded inside a
+    longer one), the longer/more specific match must win, not whichever happens to be found first by
+    row order."""
+    village_index = VillageIndex()
+    names = village_index.villages["NAME"].str.strip()
+    short_in_long = None
+    for name in names:
+        if not name:
+            continue
+        for other in names:
+            if other and other != name and name in other:
+                short_in_long = (name, other)
+                break
+        if short_in_long:
+            break
+    if short_in_long is None:
+        pytest.skip("no real village name is a substring of another in the current boundaries file")
+    short, long = short_in_long
+    result = village_index.find_by_name_fragment(f"question about {long}")
+    assert result["name"] == long
+
+
 def test_panchayat_value_monotonic_with_synthetic_grid(village_index):
     """A synthetic all-constant grid must produce that same constant for a real village's mean/p10/p50/p90/max."""
     grid = np.full((35, 50), 7.5, dtype="float32")
