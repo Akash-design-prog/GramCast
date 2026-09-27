@@ -19,9 +19,12 @@ interface Props {
   data: ForecastMapResponse | null;
   onVillageClick: (props: VillageProperties, featureId: number, lngLat: { lat: number; lng: number }) => void;
   selectedFeatureId: number | null;
+  // A new object each time (even for the same coordinates) so re-selecting the same search result still
+  // re-triggers the fly-to - see the App.tsx handler that builds this.
+  flyTarget: { lat: number; lon: number; key: number } | null;
 }
 
-function buildLayers(map: MLMap, colorField: string) {
+function buildLayers(map: MLMap, colorField: string, outline: { color: string; width: number }) {
   map.addSource(SOURCE_ID, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
   map.addLayer({
     id: LAYER_ID,
@@ -33,7 +36,7 @@ function buildLayers(map: MLMap, colorField: string) {
     id: OUTLINE_ID,
     type: "line",
     source: SOURCE_ID,
-    paint: { "line-color": "rgba(0,0,0,0.12)", "line-width": 0.4 },
+    paint: { "line-color": outline.color, "line-width": outline.width },
   });
   map.addLayer({
     id: SELECTED_ID,
@@ -44,8 +47,14 @@ function buildLayers(map: MLMap, colorField: string) {
   });
 }
 
-/** One MapLibre instance with no basemap, just the village choropleth colored by `colorField`. */
-function useMapPane(containerRef: React.RefObject<HTMLDivElement | null>, colorField: string) {
+const VILLAGE_OUTLINE = { color: "rgba(0,0,0,0.12)", width: 0.4 };
+// Bolder, more opaque lines than the village outline - a real 0.25deg grid should read as a handful of
+// clean squares, not blend into the same faint mosaic style used for 2,003 village boundaries.
+const GRID_OUTLINE = { color: "rgba(0,0,0,0.35)", width: 1.2 };
+
+/** One MapLibre instance with no basemap, just a choropleth (villages or grid cells) colored by
+ * `colorField`. */
+function useMapPane(containerRef: React.RefObject<HTMLDivElement | null>, colorField: string, outline: { color: string; width: number }) {
   const mapRef = useRef<MLMap | null>(null);
 
   useEffect(() => {
@@ -59,7 +68,7 @@ function useMapPane(containerRef: React.RefObject<HTMLDivElement | null>, colorF
       dragRotate: false,
       pitchWithRotate: false,
     });
-    map.on("load", () => buildLayers(map, colorField));
+    map.on("load", () => buildLayers(map, colorField, outline));
     mapRef.current = map;
 
     // Two related but distinct issues, both fixed here:
@@ -87,18 +96,18 @@ function useMapPane(containerRef: React.RefObject<HTMLDivElement | null>, colorF
       observer.disconnect();
       map.remove();
     };
-    // colorField is fixed per pane for the lifetime of the component - no need to react to it.
+    // colorField/outline are fixed per pane for the lifetime of the component - no need to react to them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerRef]);
 
   return mapRef;
 }
 
-export default function CompareMap({ data, onVillageClick, selectedFeatureId }: Props) {
+export default function CompareMap({ data, onVillageClick, selectedFeatureId, flyTarget }: Props) {
   const blockContainer = useRef<HTMLDivElement>(null);
   const panchayatContainer = useRef<HTMLDivElement>(null);
-  const blockMap = useMapPane(blockContainer, "block_mm");
-  const panchayatMap = useMapPane(panchayatContainer, "p50_mm");
+  const blockMap = useMapPane(blockContainer, "block_mm", GRID_OUTLINE);
+  const panchayatMap = useMapPane(panchayatContainer, "p50_mm", VILLAGE_OUTLINE);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const [slider, setSlider] = useState(55);
@@ -109,11 +118,17 @@ export default function CompareMap({ data, onVillageClick, selectedFeatureId }: 
   // district's real extent instead of a hardcoded zoom guess.
   useEffect(() => {
     if (!data) return;
-    for (const map of [blockMap.current, panchayatMap.current]) {
+    // The block pane gets the real 0.25deg grid rectangles (grid_cells), not the village polygons -
+    // same block_mm data, but rendered as actual grid squares instead of village-shaped patches.
+    const panes: [MLMap | null, GeoJSON.FeatureCollection][] = [
+      [blockMap.current, data.grid_cells as unknown as GeoJSON.FeatureCollection],
+      [panchayatMap.current, data as unknown as GeoJSON.FeatureCollection],
+    ];
+    for (const [map, collection] of panes) {
       if (!map) continue;
       const src = map.getSource(SOURCE_ID) as GeoJSONSource | undefined;
-      if (src) src.setData(data as unknown as GeoJSON.FeatureCollection);
-      else map.once("load", () => (map.getSource(SOURCE_ID) as GeoJSONSource)?.setData(data as unknown as GeoJSON.FeatureCollection));
+      if (src) src.setData(collection);
+      else map.once("load", () => (map.getSource(SOURCE_ID) as GeoJSONSource)?.setData(collection));
     }
     if (!hasFitBounds.current) {
       const [west, south, east, north] = boundsOf(data);
@@ -126,6 +141,16 @@ export default function CompareMap({ data, onVillageClick, selectedFeatureId }: 
       hasFitBounds.current = true;
     }
   }, [data, blockMap, panchayatMap]);
+
+  // Search result selected: fly both cameras to it directly (rather than relying on the move-sync
+  // effect below to propagate one pane's animated flyTo to the other, which would fight the animation).
+  useEffect(() => {
+    if (!flyTarget) return;
+    for (const map of [blockMap.current, panchayatMap.current]) {
+      if (!map) continue;
+      map.flyTo({ center: [flyTarget.lon, flyTarget.lat], zoom: Math.max(map.getZoom(), 10.5), duration: 800 });
+    }
+  }, [flyTarget, blockMap, panchayatMap]);
 
   // Camera sync: forward the block map's view to the panchayat map (and back), guarded against
   // feedback loops with a "syncing" flag.
@@ -173,16 +198,17 @@ export default function CompareMap({ data, onVillageClick, selectedFeatureId }: 
     };
   }, [panchayatMap, onVillageClick]);
 
-  // Highlight the selected village on both panes. Filtering by the feature's real id (not by name -
-  // 383/2003 villages share a name with at least one other village elsewhere in the district, e.g.
-  // "Shindewadi" appears in 6 different talukas, so a name-based filter lit up every same-named
-  // village on the map instead of just the one clicked).
+  // Highlight the selected village - panchayat pane only. Filtering by the feature's real id (not by
+  // name - 383/2003 villages share a name with at least one other village elsewhere in the district,
+  // e.g. "Shindewadi" appears in 6 different talukas, so a name-based filter lit up every same-named
+  // village on the map instead of just the one clicked). The block pane's source is grid_cells now, a
+  // completely different feature set (0-69) whose ids can coincidentally collide with a village id in
+  // that same range, so it never gets a selection filter applied.
   useEffect(() => {
     const filter: FilterSpecification = ["==", ["id"], selectedFeatureId ?? -1];
-    for (const map of [blockMap.current, panchayatMap.current]) {
-      if (map?.getLayer(SELECTED_ID)) map.setFilter(SELECTED_ID, filter);
-    }
-  }, [selectedFeatureId, blockMap, panchayatMap]);
+    const map = panchayatMap.current;
+    if (map?.getLayer(SELECTED_ID)) map.setFilter(SELECTED_ID, filter);
+  }, [selectedFeatureId, panchayatMap]);
 
   function pctFromClientX(clientX: number): number {
     const rect = stageRef.current!.getBoundingClientRect();
