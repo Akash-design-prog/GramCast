@@ -23,10 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap_data import ensure_data_available
 from inference import GramCastInference
-from villages import VillageIndex, bulk_village_stats, panchayat_value_by_index
+from villages import VillageIndex, block_grid_geojson, bulk_village_stats, panchayat_value_by_index
 from advisory.rules import CropStage, generate_advisory
 from tts import SUPPORTED_LANGUAGES, synthesize_speech
 from feedback import log_feedback
+import whatsapp_client
+import whatsapp_registry
+from whatsapp_bot import handle_incoming_message
 
 _inference: GramCastInference | None = None
 _village_index: VillageIndex | None = None
@@ -96,6 +99,10 @@ def _compute_forecast(lat: float, lon: float, date: str, crop_stage: str | None)
         "p90": panchayat_value_by_index(pred["p90"], row_index),
     }
     block = panchayat_value_by_index(pred["block_value"], row_index)
+    # terrain["dem"] is static (built once at load time, doesn't vary by date) but lives on the exact
+    # same (35, 50) grid as every rainfall raster, so the same O(1) per-village lookup already built for
+    # rainfall works unchanged - no new data loading or overlay logic needed.
+    elevation_m = panchayat_value_by_index(_inference.terrain["dem"], row_index)["mean_mm"]
 
     advisory = generate_advisory(
         p10=panchayat["p10"]["mean_mm"],
@@ -107,6 +114,7 @@ def _compute_forecast(lat: float, lon: float, date: str, crop_stage: str | None)
     return {
         "village": {k: v for k, v in village.items() if k != "row_index"},  # internal detail, not API contract
         "date": date,
+        "elevation_m": round(elevation_m, 1),
         "block_level_mm": block["mean_mm"],
         "panchayat_level": {
             "p10_mm": panchayat["p10"]["mean_mm"],
@@ -116,6 +124,17 @@ def _compute_forecast(lat: float, lon: float, date: str, crop_stage: str | None)
         "advisory": advisory,
         "model": {"checkpoint": pred["checkpoint"], "epoch": pred["checkpoint_epoch"]},
     }
+
+
+@app.get("/dates")
+def dates():
+    """Every date the dataset actually has a prediction for - the dashboard's date picker needs this to
+    only offer real dates instead of a full 1981-2026 calendar range (the data is Jun-Sep monsoon season
+    only, with real gaps, e.g. the missing 2026-09 month - see docs/ISSUES_PLAN.md train/val/test split)."""
+    if _inference is None:
+        raise HTTPException(status_code=503, detail="Models not loaded yet")
+    available = _inference.sorted_available_dates()
+    return {"dates": available, "min": available[0], "max": available[-1]}
 
 
 @app.get("/forecast")
@@ -188,6 +207,10 @@ def forecast_map(
         "date": date,
         "model": {"checkpoint": pred["checkpoint"], "epoch": pred["checkpoint_epoch"]},
         "features": features,
+        # Real 0.25deg CHIRPS grid squares (not village-shaped patches) for the dashboard's block-layer
+        # pane - same block_mm data as each feature's "block_mm" property above, just carried on its own
+        # true grid geometry instead of village boundaries (see zonal_stats.block_grid_geojson).
+        "grid_cells": block_grid_geojson(pred["block_value"]),
     }
 
 
@@ -200,9 +223,9 @@ class FeedbackIn(BaseModel):
 
 @app.post("/feedback")
 def feedback(body: FeedbackIn):
-    """Logs a farmer's reply against the forecast actually issued for their village and date - the
-    channel that collects the reply (WhatsApp webhook, docs/ISSUES_PLAN.md item 4b) isn't built yet,
-    but the logging capability itself doesn't need to wait on that."""
+    """Logs a farmer's reply against the forecast actually issued for their village and date - callable
+    directly (e.g. from the dashboard) or via the WhatsApp webhook below, which logs a non-keyword
+    reply from a registered farmer the same way."""
     if _inference is None or _village_index is None:
         raise HTTPException(status_code=503, detail="Models not loaded yet")
 
@@ -219,3 +242,74 @@ def feedback(body: FeedbackIn):
         raise HTTPException(status_code=400, detail=str(e))
 
     return {"logged": row}
+
+
+class FarmerIn(BaseModel):
+    phone: str
+    village_name: str
+    sub_district: str
+
+
+@app.post("/whatsapp/farmers")
+def register_farmer(body: FarmerIn):
+    """Registers (or updates) one farmer's WhatsApp number against a real village - docs/ISSUES_PLAN.md
+    item 4b's "manual entry table for the Pune pilot villages", exposed as an endpoint instead of asking
+    Akash to hand-edit a CSV. Rejects a village name that doesn't actually exist in the real boundaries
+    (a typo caught here is much cheaper than one only discovered when an alert silently never sends)."""
+    if _village_index is None:
+        raise HTTPException(status_code=503, detail="Models not loaded yet")
+    try:
+        _village_index.find_row_index_for(body.village_name, body.sub_district)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        row = whatsapp_registry.register_farmer(body.phone, body.village_name, body.sub_district)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"registered": row}
+
+
+@app.get("/whatsapp/farmers")
+def list_farmers():
+    return {"farmers": whatsapp_registry.list_farmers()}
+
+
+@app.get("/whatsapp/webhook")
+def whatsapp_webhook_verify(
+    hub_mode: str | None = Query(None, alias="hub.mode"),
+    hub_verify_token: str | None = Query(None, alias="hub.verify_token"),
+    hub_challenge: str | None = Query(None, alias="hub.challenge"),
+):
+    """Meta's one-time webhook verification handshake (see whatsapp_client.verify_webhook_challenge's
+    own docstring) - Meta calls this GET when Akash saves the webhook config in the app dashboard, and
+    refuses to activate the webhook unless this echoes back hub.challenge exactly."""
+    try:
+        challenge = whatsapp_client.verify_webhook_challenge(hub_mode, hub_verify_token, hub_challenge)
+    except whatsapp_client.WhatsAppError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    return Response(content=challenge, media_type="text/plain")
+
+
+@app.post("/whatsapp/webhook")
+def whatsapp_webhook_receive(body: dict):
+    """Real incoming-message handling (see whatsapp_bot.handle_incoming_message's own docstring for the
+    reply logic). Always returns 200 with an empty body - Meta retries a webhook that doesn't respond
+    200 quickly, and a message this bot can't usefully handle should still be acknowledged, not treated
+    as a delivery failure and retried."""
+    if _inference is None or _village_index is None:
+        return {}
+
+    for msg in whatsapp_client.parse_incoming_messages(body):
+        if not msg["from"] or msg["text"] is None:
+            continue  # non-text message (image/audio/status update/etc) - not handled by this MVP bot
+        result = handle_incoming_message(_inference, _village_index, msg["from"], msg["text"])
+        if not whatsapp_client.is_configured():
+            continue  # no real credentials yet - computed the reply, just can't send it out
+        whatsapp_client.send_text_message(msg["from"], result["reply_text"])
+        if result["advisory_text"]:
+            # Real forecast reply - also attach the same Marathi voice note /forecast/voice already
+            # produces, per docs/ISSUES_PLAN.md's own "attach TTS voice note to the WhatsApp reply".
+            audio_bytes, _, media_type = synthesize_speech(result["advisory_text"], "mr")
+            media_id = whatsapp_client.upload_media(audio_bytes, media_type)
+            whatsapp_client.send_audio_message(msg["from"], media_id)
+    return {}
