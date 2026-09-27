@@ -1,13 +1,18 @@
 import Sparkline from "./Sparkline";
 import { forecastVoiceUrl } from "../lib/api";
 import type { ForecastResponse } from "../lib/types";
-import { RAINFALL_RAMP } from "../lib/rainfallStyle";
+import { NO_DATA_COLOR, RAINFALL_RAMP } from "../lib/rainfallStyle";
 
+// Indices line up with IMD's own category boundaries (rainfallStyle.ts): backend/advisory/rules.py's
+// no_rain(<2.5)/light(2.5-15.5)/moderate(15.6-64.4) match RAMP[0..2] exactly; heavy(>=64.5) starts
+// exactly where IMD's own "Heavy Rain" band (RAMP[3]) begins. RAMP[0] itself is pure white (IMD's map
+// shows no colour at all for "no rain") - fine as a map fill, but invisible as a card border accent on
+// the light theme's near-white surface, so that one case gets a neutral stand-in instead.
 const CATEGORY_COLOR: Record<string, string> = {
-  no_rain: RAINFALL_RAMP[0],
+  no_rain: NO_DATA_COLOR,
   light: RAINFALL_RAMP[1],
-  moderate: RAINFALL_RAMP[3],
-  heavy: RAINFALL_RAMP[5],
+  moderate: RAINFALL_RAMP[2],
+  heavy: RAINFALL_RAMP[3],
 };
 
 const CATEGORY_LABEL: Record<string, string> = {
@@ -42,7 +47,7 @@ export default function Sidebar({ forecast, loading, error, sparkPoints, activeD
           <>
             <h3 className="village-name">{forecast.village.name}</h3>
             <p className="village-sub">
-              {forecast.village.sub_district} taluka, gram panchayat
+              {forecast.village.sub_district} taluka, gram panchayat · {forecast.elevation_m.toFixed(0)}m elevation
               {loading && " · updating..."}
             </p>
 
@@ -79,7 +84,7 @@ export default function Sidebar({ forecast, loading, error, sparkPoints, activeD
 
             <div className="sparkline">
               <p className="panel-label" style={{ marginTop: 14 }}>
-                Outlook (this dataset)
+                Trend (days leading up to this date)
               </p>
               <Sparkline points={sparkPoints} activeIndex={activeDayIndex} />
             </div>
