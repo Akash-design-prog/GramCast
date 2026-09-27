@@ -6,7 +6,7 @@ export default function Legend() {
       {RAINFALL_RAMP.map((color, i) => (
         <span className="sw" key={color}>
           <span className="chip" style={{ background: color }} />
-          {RAINFALL_LEGEND_LABELS[i]} mm
+          {RAINFALL_LEGEND_LABELS[i]}
         </span>
       ))}
     </div>
