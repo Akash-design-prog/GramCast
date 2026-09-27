@@ -2,10 +2,21 @@
 # Deploy: render.com -> New -> Blueprint -> connect Akash-design-prog/GramCast -> Render reads this file.
 #
 # Required env vars to set in Render's dashboard after the first deploy (not committed here - secrets):
-#   GRAMCAST_DATA_BUNDLE_URL   - the GitHub Release asset URL for gramcast_deploy_bundle.zip
-#                                (see scripts/prepare_deploy_bundle.py)
-#   BHASHINI_USER_ID           - optional, only if Bhashini registration has been approved
-#   BHASHINI_API_KEY           - optional, same as above - omit both and the app falls back to gTTS automatically
+#   GRAMCAST_DATA_BUNDLE_URL    - the GitHub Release asset URL for gramcast_deploy_bundle.zip
+#                                 (see scripts/prepare_deploy_bundle.py)
+#   GRAMCAST_DASHBOARD_ORIGINS  - the deployed dashboard's real origin(s), comma-separated
+#                                 (e.g. https://gramcast.vercel.app) - without this, the deployed
+#                                 frontend's every API call is silently blocked by CORS (see
+#                                 backend/main.py's own CORS setup; localhost is always allowed
+#                                 in addition to this for local dev, never needs to be listed here)
+#   BHASHINI_USER_ID            - optional, only if Bhashini registration has been approved
+#   BHASHINI_API_KEY            - optional, same as above - omit both and the app falls back to gTTS automatically
+#   WHATSAPP_ACCESS_TOKEN       - optional, only once the WhatsApp farmer channel (4b) goes live -
+#                                 omit and /whatsapp/webhook still runs, it just can't send replies
+#   WHATSAPP_PHONE_NUMBER_ID    - optional, same as above
+#   WHATSAPP_VERIFY_TOKEN       - optional, same as above - needed only for Meta's webhook verification
+#                                 handshake, i.e. once Akash actually points the Meta dashboard at this
+#                                 deployed URL
 services:
   - type: web
     name: gramcast-api
@@ -18,7 +29,15 @@ services:
     envVars:
       - key: GRAMCAST_DATA_BUNDLE_URL
         sync: false
+      - key: GRAMCAST_DASHBOARD_ORIGINS
+        sync: false
       - key: BHASHINI_USER_ID
         sync: false
       - key: BHASHINI_API_KEY
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
         sync: false
