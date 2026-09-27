@@ -47,6 +47,31 @@ def test_health(client):
     assert body["n_dates_available"] == 5582
 
 
+def test_dates_returns_real_count_and_bounds(client):
+    r = client.get("/dates")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["dates"]) == 5582
+    assert body["min"] == body["dates"][0]
+    assert body["max"] == body["dates"][-1]
+    assert body["min"] < body["max"]
+
+
+def test_dates_are_sorted_and_unique(client):
+    r = client.get("/dates")
+    dates_list = r.json()["dates"]
+    assert dates_list == sorted(dates_list)
+    assert len(set(dates_list)) == len(dates_list)
+
+
+def test_dates_only_covers_monsoon_months(client):
+    """Cross-check against the CHIRPS download scope (Jun-Sep only, see docs/ISSUES_PLAN.md item 1) -
+    every date in this list should fall in June-September."""
+    r = client.get("/dates")
+    months = {d[5:7] for d in r.json()["dates"]}
+    assert months <= {"06", "07", "08", "09"}
+
+
 def test_forecast_happy_path(client):
     r = client.get("/forecast", params={"lat": 18.75, "lon": 73.41, "date": "2023-07-15"})
     assert r.status_code == 200
@@ -56,6 +81,17 @@ def test_forecast_happy_path(client):
     assert body["panchayat_level"]["p50_mm"] <= body["panchayat_level"]["p90_mm"] + 1e-4
     assert body["advisory"]["category"] in ["no_rain", "light", "moderate", "heavy"]
     assert body["advisory"]["advisory_text"]
+    # Real DEM-derived elevation (see backend/inference.py's terrain["dem"], the same static array the
+    # model itself trains on) - Lonavala sits in the Western Ghats foothills, genuinely a few hundred
+    # metres up, never a fabricated/placeholder number.
+    assert 200 < body["elevation_m"] < 1300
+
+
+def test_forecast_elevation_is_date_independent(client):
+    """Elevation is static terrain, not a rainfall prediction - it must not change when the date does."""
+    r1 = client.get("/forecast", params={"lat": 18.75, "lon": 73.41, "date": "2023-07-15"})
+    r2 = client.get("/forecast", params={"lat": 18.75, "lon": 73.41, "date": "2019-07-20"})
+    assert r1.json()["elevation_m"] == r2.json()["elevation_m"]
 
 
 def test_forecast_unknown_date_returns_404(client):
@@ -194,8 +230,108 @@ def test_forecast_map_values_are_json_numbers_not_nan(client):
             assert v is None or (isinstance(v, (int, float)) and v == v)  # v == v is False only for NaN
 
 
+def test_forecast_map_grid_cells_are_the_real_0_25deg_block_grid(client):
+    """The block layer's real grid: 35x50 fine pixels / 5 = 7x10 coarse cells (see zonal_stats.py's
+    COARSEN_FACTOR and inference.py's own block_value construction) = 70 candidate rectangles, each
+    clipped to the real district silhouette - a cell with zero overlap is dropped entirely, so the
+    count is <= 70, not necessarily exactly 70 (regression check for a real bug: unclipped rectangles
+    used to paint non-Pune land at the corners, see DEV_LOG)."""
+    r = client.get("/forecast/map", params={"date": "2023-07-15"})
+    grid = r.json()["grid_cells"]
+    assert grid["type"] == "FeatureCollection"
+    assert 0 < len(grid["features"]) <= 70
+    ids = [f["id"] for f in grid["features"]]
+    assert len(set(ids)) == len(ids)
+    for f in grid["features"]:
+        assert f["geometry"]["type"] in ("Polygon", "MultiPolygon")
+        assert "block_mm" in f["properties"]
+
+
+def test_forecast_map_grid_cells_never_extend_beyond_the_real_district(client):
+    """Every clipped grid cell must lie entirely within the real district silhouette (union of all
+    village polygons) - regression test for the raw-rectangle version, which extended past the district
+    boundary at every corner and left gaps the panchayat layer's own polygons didn't cover."""
+    import geopandas as gpd
+    from shapely.geometry import shape
+
+    from villages import BOUNDARIES_PATH
+
+    district_union = gpd.read_file(BOUNDARIES_PATH).union_all()
+    r = client.get("/forecast/map", params={"date": "2023-07-15"})
+    for f in r.json()["grid_cells"]["features"]:
+        cell_geom = shape(f["geometry"])
+        assert cell_geom.difference(district_union).area < 1e-9
+
+
+def test_forecast_map_grid_cells_block_mm_matches_village_block_mm(client):
+    """Same underlying block_value raster feeds both the per-village block_mm property and the grid
+    cells - a village's block_mm must equal the grid cell whose rectangle actually contains it, not just
+    be independently plausible."""
+    from shapely.geometry import shape
+
+    r = client.get("/forecast/map", params={"date": "2023-07-15"})
+    body = r.json()
+    grid_cells = body["grid_cells"]["features"]
+    checked = 0
+    for feature in body["features"][:200]:  # a real sample, not exhaustive (2003 x 70 polygon tests is slow)
+        village_block_mm = feature["properties"]["block_mm"]
+        if village_block_mm is None:
+            continue
+        centroid = shape(feature["geometry"]).centroid
+        for cell in grid_cells:
+            if shape(cell["geometry"]).contains(centroid):
+                assert cell["properties"]["block_mm"] == village_block_mm
+                checked += 1
+                break
+    assert checked > 100
+
+
 def test_feedback_long_unicode_reply_text_logs_successfully(client):
     long_text = "no rain here " * 200 + "नाही"  # Devanagari "no" appended
     r = client.post("/feedback", json={"lat": 18.75, "lon": 73.41, "date": "2023-07-15", "reply_text": long_text})
     assert r.status_code == 200
     assert r.json()["logged"]["reply_text"] == long_text.strip()
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp (docs/ISSUES_PLAN.md item 4b)
+# ---------------------------------------------------------------------------
+
+def test_whatsapp_webhook_verify_success(client, monkeypatch):
+    monkeypatch.setenv("WHATSAPP_VERIFY_TOKEN", "test_verify_token")
+    r = client.get("/whatsapp/webhook", params={"hub.mode": "subscribe", "hub.verify_token": "test_verify_token", "hub.challenge": "1158201444"})
+    assert r.status_code == 200
+    assert r.text == "1158201444"
+
+
+def test_whatsapp_webhook_verify_wrong_token_returns_403(client, monkeypatch):
+    monkeypatch.setenv("WHATSAPP_VERIFY_TOKEN", "test_verify_token")
+    r = client.get("/whatsapp/webhook", params={"hub.mode": "subscribe", "hub.verify_token": "wrong", "hub.challenge": "123"})
+    assert r.status_code == 403
+
+
+def test_whatsapp_webhook_post_returns_200_without_credentials(client, monkeypatch):
+    """No WHATSAPP_ACCESS_TOKEN set in the test environment - the reply is computed but not actually
+    sent, and the endpoint must still ack with 200 (Meta retries a webhook that doesn't)."""
+    monkeypatch.delenv("WHATSAPP_ACCESS_TOKEN", raising=False)
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [{"id": "WABA_ID", "changes": [{"value": {"messages": [{"from": "919876543210", "id": "wamid.1", "type": "text", "text": {"body": "Lonavala weather"}}]}, "field": "messages"}]}],
+    }
+    r = client.post("/whatsapp/webhook", json=payload)
+    assert r.status_code == 200
+
+
+def test_register_farmer_and_list(client):
+    r = client.post("/whatsapp/farmers", json={"phone": "919876543299", "village_name": "Lonavala (M Cl)", "sub_district": "Mawal"})
+    assert r.status_code == 200
+    assert r.json()["registered"]["village_name"] == "Lonavala (M Cl)"
+
+    r = client.get("/whatsapp/farmers")
+    assert r.status_code == 200
+    assert any(f["phone"] == "919876543299" for f in r.json()["farmers"])
+
+
+def test_register_farmer_unknown_village_returns_400(client):
+    r = client.post("/whatsapp/farmers", json={"phone": "919876543298", "village_name": "Not A Real Village XYZ", "sub_district": "Nowhere"})
+    assert r.status_code == 400
