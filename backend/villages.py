@@ -2,6 +2,7 @@
 (35, 50) prediction grid into that panchayat's actual value - reusing the already-verified zonal-stats
 module (`data_pipeline/overlay/zonal_stats.py`) rather than reimplementing raster/vector overlay logic.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from shapely.geometry import Point
 
 _OVERLAY_DIR = Path(__file__).resolve().parents[1] / "data_pipeline" / "overlay"
 sys.path.insert(0, str(_OVERLAY_DIR))
-from zonal_stats import BOUNDARIES_PATH, compute_village_stats, village_stats_by_index  # noqa: E402
+from zonal_stats import BOUNDARIES_PATH, block_grid_geojson, compute_village_stats, get_cached_villages, village_stats_by_index  # noqa: E402
 
 
 class VillageIndex:
@@ -52,6 +53,56 @@ class VillageIndex:
             raise ValueError(f"village '{name}' ({sub_district}) not found in boundaries")
         return matches.iloc[0]
 
+    def find_row_index_for(self, name: str, sub_district: str) -> int:
+        """Like village_row_for(), but returns the positional row_index directly - self.villages was
+        built with reset_index(drop=True) in __init__, so its pandas index already equals row order
+        (0..N-1) exactly; no separate lookup needed."""
+        matches = self.villages[(self.villages["NAME"] == name) & (self.villages["SUB_DIST"] == sub_district)]
+        if len(matches) == 0:
+            raise ValueError(f"village '{name}' ({sub_district}) not found in boundaries")
+        return int(matches.index[0])
+
+    def find_by_name_fragment(self, text: str) -> dict | None:
+        """Case-insensitive, word-boundary match of `text` against every village name - used by the
+        WhatsApp bot to parse a free-text message like "Baramati weather" into a real village, since a
+        farmer can't tap a map. Picks the LONGEST matching name when several match (a real village name
+        can itself be a raw substring of another, e.g. a 5-letter village embedded inside a 6-letter
+        one), and requires a real word boundary (regex \\b) rather than a bare substring test - two real
+        bugs caught here via "test the test" on ordinary sentences, not hypothetical:
+          1. 45/2003 real villages have a BLANK name in the source boundaries file - `"" in text` is
+             always True in Python, so an unguarded substring test matched every single message, even
+             "hello there", against whichever blank-named village came first in row order.
+          2. Without a word-boundary requirement, a short real village name can match as a fragment
+             inside a completely unrelated English word (bare substring search, not "does this word
+             appear"), producing a false match on ordinary chat text.
+        Also matches against each name with a trailing official suffix like "(M Cl)"/"(CT)" stripped -
+        a real farmer typing "Lonavala" would never type "Lonavala (M Cl)" (the boundaries file's exact
+        official name), so matching only the literal full name made every suffixed village unreachable
+        by a plausible real message.
+
+        Returns None if no real (non-blank) village name matches as a whole word/phrase anywhere in the
+        text. Does NOT disambiguate same-named villages by taluka (383/2003 villages share a name with
+        another elsewhere in the district, see backend/main.py's forecast_map docstring) - a known,
+        documented limitation for this MVP, not a silent bug."""
+        text_lower = text.lower()
+        best: tuple[int, int] | None = None  # (name_len, row_index)
+        for row_index, name in enumerate(self.villages["NAME"]):
+            name_stripped = name.strip()
+            if not name_stripped:
+                continue
+            core_name = re.sub(r"\s*\([^)]*\)\s*$", "", name_stripped).strip()
+            candidate = (core_name or name_stripped).lower()
+            if not candidate:
+                continue
+            if re.search(r"\b" + re.escape(candidate) + r"\b", text_lower):
+                if best is None or len(candidate) > best[0]:
+                    best = (len(candidate), row_index)
+        if best is None:
+            return None
+        row_index = best[1]
+        row = self.villages.iloc[row_index]
+        return {"name": row["NAME"], "sub_district": row["SUB_DIST"], "matched_by": "name_fragment", "row_index": row_index}
+
 
 def bulk_village_stats(pred: dict) -> gpd.GeoDataFrame:
     """All ~2,000 villages' block value + P10/P50/P90 panchayat values for one day, as a single
@@ -74,7 +125,10 @@ def bulk_village_stats(pred: dict) -> gpd.GeoDataFrame:
             f"row order drifted between the block and {label} zonal-stats calls - positional merge unsafe"
         )
 
-    villages = gpd.read_file(BOUNDARIES_PATH)[["NAME", "SUB_DIST", "geometry"]].reset_index(drop=True)
+    # Reuses zonal_stats.py's own cached read (get_cached_villages()) instead of a second independent
+    # gpd.read_file(BOUNDARIES_PATH) - profiling caught this as a real ~1.8-2.3s-per-call cost, paid on
+    # every single /forecast/map request for a file that never changes at runtime.
+    villages = get_cached_villages()[["NAME", "SUB_DIST", "geometry"]].reset_index(drop=True)
     assert (villages["NAME"].values == block_stats["NAME"].values).all(), (
         "boundaries file row order does not match zonal-stats output order - positional merge unsafe"
     )
