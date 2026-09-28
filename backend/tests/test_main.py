@@ -335,3 +335,23 @@ def test_register_farmer_and_list(client):
 def test_register_farmer_unknown_village_returns_400(client):
     r = client.post("/whatsapp/farmers", json={"phone": "919876543298", "village_name": "Not A Real Village XYZ", "sub_district": "Nowhere"})
     assert r.status_code == 400
+
+
+def test_whatsapp_simulate_forecast_reply_includes_real_voice_note(client):
+    """The simulator's whole point is that it's the REAL bot logic - a forecast reply must come back
+    with a real synthesized voice note attached, exactly like the live webhook would send one."""
+    r = client.post("/whatsapp/simulate", json={"from": "919876543210", "text": "Lonavala weather"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "Lonavala" in body["reply_text"]
+    assert body["audio_base64"] is not None
+    assert body["audio_media_type"] in ("audio/mpeg", "audio/wav")
+    import base64
+    assert len(base64.b64decode(body["audio_base64"])) > 1000  # a real audio clip, not an empty stub
+
+
+def test_whatsapp_simulate_help_message_has_no_voice_note(client):
+    r = client.post("/whatsapp/simulate", json={"from": "000000000000", "text": "hello"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["audio_base64"] is None
