@@ -11,13 +11,14 @@ from pathlib import Path
 
 from contextlib import asynccontextmanager
 
+import base64
 import math
 import os
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -313,3 +314,30 @@ def whatsapp_webhook_receive(body: dict):
             media_id = whatsapp_client.upload_media(audio_bytes, media_type)
             whatsapp_client.send_audio_message(msg["from"], media_id)
     return {}
+
+
+class WhatsAppSimulateIn(BaseModel):
+    from_: str = Field(alias="from")
+    text: str
+
+
+@app.post("/whatsapp/simulate")
+def whatsapp_simulate(body: WhatsAppSimulateIn):
+    """Demo-only endpoint for the WhatsApp-styled web simulator (frontend/dashboard/public/whatsapp-
+    simulator.html) - a fallback for the pitch video/demo if real Meta credentials aren't ready in time.
+
+    Calls the EXACT SAME handle_incoming_message() the real /whatsapp/webhook uses - this is not a
+    separate reimplementation, so whatever the simulator shows is genuinely what the bot would say over
+    real WhatsApp too, not a scripted/fake demo. The one real difference: this returns the reply (and a
+    base64 voice note) directly in the HTTP response for the browser to render, instead of pushing it
+    out through the Cloud API - there is no real WhatsApp message involved anywhere in this endpoint."""
+    if _inference is None or _village_index is None:
+        raise HTTPException(status_code=503, detail="Models not loaded yet")
+
+    result = handle_incoming_message(_inference, _village_index, body.from_, body.text)
+    response = {"reply_text": result["reply_text"], "audio_base64": None, "audio_media_type": None}
+    if result["advisory_text"]:
+        audio_bytes, _, media_type = synthesize_speech(result["advisory_text"], "mr")
+        response["audio_base64"] = base64.b64encode(audio_bytes).decode("ascii")
+        response["audio_media_type"] = media_type
+    return response
