@@ -23,7 +23,7 @@ services:
     runtime: python
     plan: free
     region: singapore  # closest free-tier region to India at time of writing; change if Render adds a closer one
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r backend/requirements.txt
     startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:

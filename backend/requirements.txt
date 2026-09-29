@@ -1,0 +1,30 @@
+# Deployed-backend-only dependencies, traced from the real import chain of backend/main.py and every
+# module it imports (backend/villages.py, tts.py, bhashini_tts.py, whatsapp_*.py, ml/model/unet.py +
+# preprocessing.py + mass_conservation.py) -- deliberately NOT the root requirements.txt, which is the
+# whole project's combined data-pipeline/ML-training/backend list and pulls in packages the deployed
+# API never imports (xarray, netCDF4, cfgrib, rioxarray, rasterstats, scipy, matplotlib, cartopy,
+# scikit-learn, gstools, torchvision). Real bug this fixes: Render's free 512MB tier OOM'd during
+# `pip install`/import of that full list, dominated by torch's DEFAULT wheel pulling in a full CUDA
+# toolkit (dozens of nvidia-cu13-* packages, gigabytes) that a CPU-only host never uses -- the
+# --extra-index-url below forces the much smaller CPU-only build instead.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+
+fastapi
+uvicorn[standard]
+python-multipart
+numpy
+geopandas
+pandas
+shapely
+rasterio
+requests
+gTTS
+# xarray+netCDF4: NOT visible from a static top-of-file import scan - zonal_stats.py's
+# get_chirps_grid_transform() imports xarray lazily, inside the function body, to read the CHIRPS
+# grid-reference .nc file. netCDF4 specifically (not just scipy) because CHIRPS ships modern
+# NetCDF4/HDF5-format files, which scipy's own netcdf reader cannot open. Found by actually booting
+# the backend against this exact requirements file and hitting a real /forecast request, not by
+# reading source - a static import scan alone would have missed this and shipped another broken deploy.
+xarray
+netCDF4
