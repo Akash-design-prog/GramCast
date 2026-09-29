@@ -1,0 +1,26 @@
+name: Backend tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Fetch real training data + checkpoint
+        env:
+          GRAMCAST_DATA_BUNDLE_URL: https://github.com/Akash-design-prog/GramCast/releases/download/deploy-data-v1/gramcast_deploy_bundle.zip
+        run: python -c "from backend.bootstrap_data import ensure_data_available; ensure_data_available()"
+
+      - name: Run the real test suite
+        run: pytest backend/tests -v
