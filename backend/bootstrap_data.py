@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TRAINING_PAIRS_DIR = ROOT / "data" / "processed" / "training_pairs"
 CHIRPS_DIR = ROOT / "data" / "raw" / "chirps"
 CHECKPOINT_DIR = ROOT / "ml" / "checkpoints"
+BOUNDARIES_DIR = ROOT / "data" / "boundaries"
 
 REQUIRED_TRAINING_PAIR_FILES = [
     "fine_rainfall.npy",
@@ -25,9 +26,20 @@ REQUIRED_TRAINING_PAIR_FILES = [
     "valid_mask.npy",
     "dates.npy",
     "split_indices.npz",
-    "era5_humidity_wind.npz",
+    # 3 plain .npy files, not era5_humidity_wind.npz - inference.py mmaps these individually to avoid a
+    # real OOM on Render's free tier; an .npz can't be mmap'd directly (see inference.py, scripts/
+    # prepare_deploy_bundle.py). Filenames must match preprocessing.py's ERA5_CHANNELS.
+    "era5_humidity_proxy.npy",
+    "era5_wind_u.npy",
+    "era5_wind_v.npy",
 ]
 REQUIRED_CHIRPS_FILE = "chirps_pune_2023_07.nc"
+# Real bug caught via a genuine CI failure, not proactively: this file is gitignored (data/ is a
+# blanket-ignored directory) and was never actually included in prepare_deploy_bundle.py, so every
+# deployed/CI boot's VillageIndex() (backend/main.py's lifespan startup, right after GramCastInference())
+# failed with a FileNotFoundError before the app ever came up - the 41 "failing" tests in CI were this
+# one root cause cascading, not 41 separate bugs.
+REQUIRED_BOUNDARIES_FILE = "pune_villages.geojson"
 
 DOWNLOAD_TIMEOUT_S = 300
 
@@ -36,6 +48,8 @@ def _is_data_present() -> bool:
     if not all((TRAINING_PAIRS_DIR / f).exists() for f in REQUIRED_TRAINING_PAIR_FILES):
         return False
     if not (CHIRPS_DIR / REQUIRED_CHIRPS_FILE).exists():
+        return False
+    if not (BOUNDARIES_DIR / REQUIRED_BOUNDARIES_FILE).exists():
         return False
     if not any(CHECKPOINT_DIR.glob("*_best.pt")):
         return False
@@ -62,6 +76,7 @@ def ensure_data_available() -> None:
     TRAINING_PAIRS_DIR.mkdir(parents=True, exist_ok=True)
     CHIRPS_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    BOUNDARIES_DIR.mkdir(parents=True, exist_ok=True)
 
     zip_path = ROOT / "_gramcast_deploy_bundle_download.zip"
     with requests.get(bundle_url, stream=True, timeout=DOWNLOAD_TIMEOUT_S) as resp:
@@ -78,6 +93,8 @@ def ensure_data_available() -> None:
                 zf.extract(member, CHIRPS_DIR.parent)
             elif member.startswith("checkpoints/"):
                 zf.extract(member, CHECKPOINT_DIR.parent)
+            elif member.startswith("boundaries/"):
+                zf.extract(member, BOUNDARIES_DIR.parent)
     zip_path.unlink()
 
     if not _is_data_present():

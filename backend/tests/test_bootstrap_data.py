@@ -22,14 +22,16 @@ def fake_root(tmp_path, monkeypatch):
     training_pairs = root / "data" / "processed" / "training_pairs"
     chirps = root / "data" / "raw" / "chirps"
     checkpoints = root / "ml" / "checkpoints"
-    for d in [training_pairs, chirps, checkpoints]:
+    boundaries = root / "data" / "boundaries"
+    for d in [training_pairs, chirps, checkpoints, boundaries]:
         d.mkdir(parents=True)
 
     monkeypatch.setattr(bd, "ROOT", root)
     monkeypatch.setattr(bd, "TRAINING_PAIRS_DIR", training_pairs)
     monkeypatch.setattr(bd, "CHIRPS_DIR", chirps)
     monkeypatch.setattr(bd, "CHECKPOINT_DIR", checkpoints)
-    return root, training_pairs, chirps, checkpoints
+    monkeypatch.setattr(bd, "BOUNDARIES_DIR", boundaries)
+    return root, training_pairs, chirps, checkpoints, boundaries
 
 
 def _make_real_bundle_zip(path: Path):
@@ -38,6 +40,7 @@ def _make_real_bundle_zip(path: Path):
             zf.writestr(f"training_pairs/{name}", b"fake data for " + name.encode())
         zf.writestr(f"chirps/{bd.REQUIRED_CHIRPS_FILE}", b"fake chirps nc bytes")
         zf.writestr("checkpoints/gramcast_fake_best.pt", b"fake checkpoint bytes")
+        zf.writestr(f"boundaries/{bd.REQUIRED_BOUNDARIES_FILE}", b"fake geojson bytes")
 
 
 class _FakeStreamResponse:
@@ -70,36 +73,49 @@ def test_is_data_present_false_when_nothing_exists(fake_root):
 
 
 def test_is_data_present_true_when_everything_exists(fake_root):
-    root, training_pairs, chirps, checkpoints = fake_root
+    root, training_pairs, chirps, checkpoints, boundaries = fake_root
     for name in bd.REQUIRED_TRAINING_PAIR_FILES:
         (training_pairs / name).write_bytes(b"x")
     (chirps / bd.REQUIRED_CHIRPS_FILE).write_bytes(b"x")
     (checkpoints / "run_best.pt").write_bytes(b"x")
+    (boundaries / bd.REQUIRED_BOUNDARIES_FILE).write_bytes(b"x")
     assert bd._is_data_present() is True
 
 
 def test_is_data_present_false_when_only_some_training_pair_files_exist(fake_root):
-    root, training_pairs, chirps, checkpoints = fake_root
+    root, training_pairs, chirps, checkpoints, boundaries = fake_root
     (training_pairs / bd.REQUIRED_TRAINING_PAIR_FILES[0]).write_bytes(b"x")
     (chirps / bd.REQUIRED_CHIRPS_FILE).write_bytes(b"x")
     (checkpoints / "run_best.pt").write_bytes(b"x")
+    (boundaries / bd.REQUIRED_BOUNDARIES_FILE).write_bytes(b"x")
     assert bd._is_data_present() is False
 
 
 def test_is_data_present_false_when_checkpoint_missing(fake_root):
-    root, training_pairs, chirps, checkpoints = fake_root
+    root, training_pairs, chirps, checkpoints, boundaries = fake_root
     for name in bd.REQUIRED_TRAINING_PAIR_FILES:
         (training_pairs / name).write_bytes(b"x")
     (chirps / bd.REQUIRED_CHIRPS_FILE).write_bytes(b"x")
+    (boundaries / bd.REQUIRED_BOUNDARIES_FILE).write_bytes(b"x")
     assert bd._is_data_present() is False
 
 
-def test_ensure_data_available_noop_when_already_present(fake_root, monkeypatch):
-    root, training_pairs, chirps, checkpoints = fake_root
+def test_is_data_present_false_when_boundaries_file_missing(fake_root):
+    root, training_pairs, chirps, checkpoints, boundaries = fake_root
     for name in bd.REQUIRED_TRAINING_PAIR_FILES:
         (training_pairs / name).write_bytes(b"x")
     (chirps / bd.REQUIRED_CHIRPS_FILE).write_bytes(b"x")
     (checkpoints / "run_best.pt").write_bytes(b"x")
+    assert bd._is_data_present() is False
+
+
+def test_ensure_data_available_noop_when_already_present(fake_root, monkeypatch):
+    root, training_pairs, chirps, checkpoints, boundaries = fake_root
+    for name in bd.REQUIRED_TRAINING_PAIR_FILES:
+        (training_pairs / name).write_bytes(b"x")
+    (chirps / bd.REQUIRED_CHIRPS_FILE).write_bytes(b"x")
+    (checkpoints / "run_best.pt").write_bytes(b"x")
+    (boundaries / bd.REQUIRED_BOUNDARIES_FILE).write_bytes(b"x")
 
     with patch("bootstrap_data.requests.get") as mock_get:
         bd.ensure_data_available()
@@ -123,12 +139,13 @@ def test_ensure_data_available_downloads_and_extracts_real_zip(fake_root, tmp_pa
     with patch("bootstrap_data.requests.get", return_value=_FakeStreamResponse(bundle_path)):
         bd.ensure_data_available()
 
-    root, training_pairs, chirps, checkpoints = fake_root
+    root, training_pairs, chirps, checkpoints, boundaries = fake_root
     for name in bd.REQUIRED_TRAINING_PAIR_FILES:
         assert (training_pairs / name).exists(), f"{name} not extracted"
         assert (training_pairs / name).read_bytes() == b"fake data for " + name.encode()
     assert (chirps / bd.REQUIRED_CHIRPS_FILE).exists()
     assert (checkpoints / "gramcast_fake_best.pt").exists()
+    assert (boundaries / bd.REQUIRED_BOUNDARIES_FILE).exists()
     # the downloaded zip itself must be cleaned up, not left lying around
     assert not (root / "_gramcast_deploy_bundle_download.zip").exists()
 
@@ -139,9 +156,9 @@ def test_ensure_data_available_raises_if_bundle_missing_a_required_file(fake_roo
     monkeypatch.setenv("GRAMCAST_DATA_BUNDLE_URL", "https://example.com/fake-bundle.zip")
     bundle_path = tmp_path / "incomplete_bundle.zip"
     with zipfile.ZipFile(bundle_path, "w") as zf:
-        # deliberately omit era5_humidity_wind.npz and the checkpoint
+        # deliberately omit one era5 split file and the checkpoint
         for name in bd.REQUIRED_TRAINING_PAIR_FILES:
-            if name == "era5_humidity_wind.npz":
+            if name == "era5_humidity_proxy.npy":
                 continue
             zf.writestr(f"training_pairs/{name}", b"data")
         zf.writestr(f"chirps/{bd.REQUIRED_CHIRPS_FILE}", b"data")

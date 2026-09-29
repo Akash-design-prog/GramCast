@@ -33,14 +33,30 @@ class GramCastInference:
     def __init__(self, checkpoint_path: Path = DEFAULT_CHECKPOINT):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.fine = np.load(TRAINING_PAIRS_DIR / "fine_rainfall.npy")
-        self.coarse_bicubic = np.load(TRAINING_PAIRS_DIR / "coarse_rainfall_bicubic.npy")
+        # mmap_mode="r" instead of a full load: predict_day() only ever touches a single date's slice
+        # (self.fine[idx:idx+1] etc.) per request, so there's no reason to hold all 5,582 dates of
+        # fine/coarse/era5 arrays resident in RAM for the process's whole lifetime. This is the fix for
+        # a real OOM on Render's free tier (512MB) - the old full-load version needed ~185-205MB for
+        # these arrays alone (fine 37MB + coarse 37MB + era5's 3 channels ~110-130MB), plus another
+        # near-duplicate temporary allocation for the train-subset stats computation below, well past
+        # what was available. era5 is split into 3 plain .npy files (era5_<channel>.npy) instead of the
+        # original era5_humidity_wind.npz specifically because mmap_mode requires a flat, uncompressed
+        # .npy file - an .npz is a zip container and numpy cannot mmap into one directly, compressed or
+        # not (see scripts/prepare_deploy_bundle.py, which builds these sidecar files from the npz).
+        self.fine = np.load(TRAINING_PAIRS_DIR / "fine_rainfall.npy", mmap_mode="r")
+        self.coarse_bicubic = np.load(TRAINING_PAIRS_DIR / "coarse_rainfall_bicubic.npy", mmap_mode="r")
         self.dates = np.load(TRAINING_PAIRS_DIR / "dates.npy")
         self.valid_mask = np.load(TRAINING_PAIRS_DIR / "valid_mask.npy")
         self.terrain = dict(np.load(TRAINING_PAIRS_DIR / "terrain_static.npz"))
-        era5_npz = np.load(TRAINING_PAIRS_DIR / "era5_humidity_wind.npz")
-        self.era5 = {name: era5_npz[name] for name in ERA5_CHANNELS}
+        self.era5 = {
+            name: np.load(TRAINING_PAIRS_DIR / f"era5_{name}.npy", mmap_mode="r") for name in ERA5_CHANNELS
+        }
 
+        # Fancy-indexing a memmap with an array of indices (train_idx) reads exactly those rows off
+        # disk into a real, temporary in-memory ndarray - unavoidable since computing normalization
+        # stats genuinely needs to see the training subset's real values, but it's freed by the GC once
+        # this constructor returns, unlike the arrays above which stay as mmap handles for the process's
+        # whole life. Net effect: a temporary startup spike instead of a permanent resident cost.
         splits = np.load(TRAINING_PAIRS_DIR / "split_indices.npz")
         train_idx = splits["train"]
         era5_train = {name: arr[train_idx] for name, arr in self.era5.items()}
@@ -100,7 +116,10 @@ class GramCastInference:
         block_value = np.repeat(np.repeat(coarse_nn, 5, axis=1), 5, axis=2)
 
         x_t = torch.from_numpy(x).to(self.device)
-        bicubic_t = torch.from_numpy(coarse_bicubic_day).unsqueeze(1).float().to(self.device)
+        # np.array(...) copies out of the read-only mmap view first: torch.from_numpy on a memmap slice
+        # works but emits a "not writable" warning every single request, since the mmap's pages are
+        # read-only and torch always wants a writable buffer even though we never write to this tensor.
+        bicubic_t = torch.from_numpy(np.array(coarse_bicubic_day)).unsqueeze(1).float().to(self.device)
         coarse_nn_t = torch.from_numpy(block_value).unsqueeze(1).float().to(self.device)
 
         with torch.no_grad():
