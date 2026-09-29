@@ -9,12 +9,22 @@ import { boundsOf } from "../lib/geo";
 // statically detect that reference, so it never emits maplibre-gl-worker.mjs into dist/assets/. This
 // worked in `npm run dev` (Vite's dev server resolves the module graph live) but broke on the real
 // Vercel build: the worker request 404'd, and vercel.json's own SPA catch-all rewrite then served
-// index.html (text/html) in its place, which the browser rejects for a module script. Fix: import the
-// worker with Vite's `?url` suffix (a static import Vite's bundler can see and correctly copy/hash
-// into the build output in both dev and prod) and hand the real resolved URL to maplibre-gl's own
-// public escape hatch, before any Map is constructed.
-import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
-setWorkerUrl(maplibreWorkerUrl);
+// index.html (text/html) in its place, which the browser rejects for a module script.
+//
+// A first fix attempt imported the worker with Vite's `?url` suffix, which correctly copies/hashes it
+// into dist/assets/ - but the worker file ITSELF has its own internal `import "./maplibre-gl-shared.mjs"`
+// (a second real chunk, hardcoded as a plain relative path baked into the copied file's source text).
+// Vite's `?url` import only copies the one file asked for; it never rewrites that internal relative
+// import, so the worker then requests an unhashed `maplibre-gl-shared.mjs` sitting next to wherever it
+// was served from - which the hashed dist/assets/ output never has, hitting the exact same
+// 404-caught-by-SPA-rewrite failure one level deeper.
+//
+// Real fix: copy BOTH files verbatim (unhashed, exact original filenames, same directory) into
+// public/ - see frontend/dashboard/public/maplibre-gl-worker.mjs and maplibre-gl-shared.mjs. Vite's
+// public/ assets are served as-is from the site root with no processing, so the worker's own relative
+// import resolves correctly by filename match, in both dev and prod. Tradeoff: these 2 files must be
+// re-copied from node_modules/maplibre-gl/dist/ by hand if maplibre-gl is ever upgraded.
+setWorkerUrl(`${import.meta.env.BASE_URL}maplibre-gl-worker.mjs`);
 
 const SOURCE_ID = "villages";
 const LAYER_ID = "villages-fill";
