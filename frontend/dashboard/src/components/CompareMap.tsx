@@ -1,9 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { Map as MLMap, GeoJSONSource } from "maplibre-gl";
+import { Map as MLMap, GeoJSONSource, setWorkerUrl } from "maplibre-gl";
 import type { StyleSpecification, FilterSpecification, MapMouseEvent } from "maplibre-gl";
 import type { ForecastMapResponse, VillageProperties } from "../lib/types";
 import { rainfallFillExpression } from "../lib/rainfallStyle";
 import { boundsOf } from "../lib/geo";
+// maplibre-gl resolves its tile-parsing Web Worker at runtime via a computed URL inside its own
+// bundle, built from a template string rather than a static literal - Vite's production build can't
+// statically detect that reference, so it never emits maplibre-gl-worker.mjs into dist/assets/. This
+// worked in `npm run dev` (Vite's dev server resolves the module graph live) but broke on the real
+// Vercel build: the worker request 404'd, and vercel.json's own SPA catch-all rewrite then served
+// index.html (text/html) in its place, which the browser rejects for a module script. Fix: import the
+// worker with Vite's `?url` suffix (a static import Vite's bundler can see and correctly copy/hash
+// into the build output in both dev and prod) and hand the real resolved URL to maplibre-gl's own
+// public escape hatch, before any Map is constructed.
+import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
+setWorkerUrl(maplibreWorkerUrl);
 
 const SOURCE_ID = "villages";
 const LAYER_ID = "villages-fill";
